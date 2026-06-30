@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Monitor Eléctrico</title>
+    <style>
+        /* (Los estilos son los mismos que en el ejemplo anterior) */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0a0e17;
+            color: #fff;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .card {
+            background: #1a1f2e;
+            padding: 40px;
+            border-radius: 20px;
+            max-width: 500px;
+            width: 90%;
+            text-align: center;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+        }
+
+        .icon {
+            font-size: 80px;
+            margin-bottom: 20px;
+        }
+
+        .icon.online {
+            color: #00ff88;
+        }
+
+        .icon.offline {
+            color: #ff4444;
+        }
+
+        .icon.checking {
+            color: #ffaa00;
+        }
+
+        h1 {
+            font-size: 2em;
+            margin-bottom: 10px;
+        }
+
+        .status {
+            font-size: 1.5em;
+            font-weight: bold;
+            margin: 15px 0;
+            padding: 10px;
+            border-radius: 10px;
+        }
+
+        .status.online {
+            color: #00ff88;
+        }
+
+        .status.offline {
+            color: #ff4444;
+        }
+
+        .status.checking {
+            color: #ffaa00;
+        }
+
+        .info {
+            background: #0a0e17;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 15px 0;
+            text-align: left;
+        }
+
+        .info div {
+            padding: 5px 0;
+            color: #aaa;
+        }
+
+        .info span {
+            color: #fff;
+            float: right;
+        }
+
+        .last-update {
+            color: #666;
+            font-size: 0.8em;
+            margin-top: 20px;
+        }
+
+        .error {
+            color: #ff4444;
+            margin: 10px 0;
+        }
+
+        .loading {
+            color: #ffaa00;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="card">
+        <div id="icon" class="icon checking">⚡</div>
+        <h1>Monitor Eléctrico</h1>
+        <div id="status" class="status checking">⏳ Verificando...</div>
+
+        <div class="info">
+            <div>🖥️ Host <span id="hostname">---</span></div>
+            <div>📡 IP <span id="ip">---</span></div>
+            <div>⏰ Última conexión <span id="timestamp">---</span></div>
+        </div>
+
+        <div id="message" class="last-update"></div>
+    </div>
+
+    <script>
+        // --- CONFIGURACIÓN ---
+        const REPO_OWNER = 'TU_USUARIO_DE_GITHUB';
+        const REPO_NAME = 'NOMBRE_DEL_REPOSITORIO';
+        const ISSUE_TITLE = 'Estado del Monitor Eléctrico';
+        // --------------------
+
+        const statusEl = document.getElementById('status');
+        const iconEl = document.getElementById('icon');
+        const hostnameEl = document.getElementById('hostname');
+        const ipEl = document.getElementById('ip');
+        const timestampEl = document.getElementById('timestamp');
+        const messageEl = document.getElementById('message');
+
+        async function checkStatus() {
+            try {
+                setStatus('checking', '⏳ Verificando...', '⚡');
+
+                // 1. Buscar el issue por su título
+                const searchResponse = await fetch(
+                    `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/issues?state=all`
+                );
+                const issues = await searchResponse.json();
+                const issue = issues.find(i => i.title === ISSUE_TITLE);
+
+                if (!issue) {
+                    throw new Error('Issue no encontrado');
+                }
+
+                // 2. Obtener el contenido del issue (el body)
+                const issueResponse = await fetch(issue.url);
+                const issueData = await issueResponse.json();
+
+                // 3. Parsear el JSON del body
+                const data = JSON.parse(issueData.body);
+
+                // 4. Actualizar la UI
+                hostnameEl.textContent = data.hostname || 'Desconocido';
+                ipEl.textContent = data.ip || 'Desconocida';
+
+                const lastUpdate = new Date(data.timestamp);
+                timestampEl.textContent = lastUpdate.toLocaleString('es-ES');
+
+                // 5. Determinar estado
+                const now = new Date();
+                const diffMinutes = Math.floor((now - lastUpdate) / 1000 / 60);
+
+                if (diffMinutes < 45) {
+                    setStatus('online', '✅ EN LÍNEA', '🟢');
+                    messageEl.textContent = `Última actualización hace ${diffMinutes} minutos`;
+                    messageEl.style.color = '#00ff88';
+                } else {
+                    setStatus('offline', '❌ SIN CORRIENTE', '🔴');
+                    messageEl.textContent = `Sin conexión desde hace ${diffMinutes} minutos`;
+                    messageEl.style.color = '#ff4444';
+                }
+
+            } catch (error) {
+                console.error('Error:', error);
+                setStatus('offline', '❌ ERROR DE CONEXIÓN', '🔴');
+                messageEl.textContent = 'No se pudo conectar con el servidor';
+                messageEl.style.color = '#ff4444';
+            }
+        }
+
+        function setStatus(type, text, icon) {
+            statusEl.className = `status ${type}`;
+            statusEl.textContent = text;
+            iconEl.className = `icon ${type}`;
+            iconEl.textContent = icon;
+        }
+
+        // Verificar inmediatamente y cada 30 segundos
+        checkStatus();
+        setInterval(checkStatus, 30000);
+    </script>
+</body>
+
+</html>
