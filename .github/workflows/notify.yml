@@ -1,0 +1,79 @@
+name: Notificar vuelta de luz
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restaurar estado anterior
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: state.json
+          key: hayluz-state-${{ github.run_id }}
+          restore-keys: hayluz-state-
+
+      - name: Verificar issue y notificar
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          OFFLINE_THRESHOLD=45
+          STATE_FILE="state.json"
+
+          ISSUES=$(curl -s "https://api.github.com/repos/carlichezz/hayluz/issues?state=all")
+          ISSUE_URL=$(echo "$ISSUES" | jq -r '.[] | select(.title == "Hay Luz en el CEINPET?") | .url')
+
+          if [ -z "$ISSUE_URL" ] || [ "$ISSUE_URL" = "null" ]; then
+            echo "Error: Issue no encontrado"
+            exit 1
+          fi
+
+          BODY=$(curl -s "$ISSUE_URL" | jq -r '.body')
+          TIMESTAMP=$(echo "$BODY" | jq -r '.timestamp')
+
+          if [ -z "$TIMESTAMP" ] || [ "$TIMESTAMP" = "null" ]; then
+            echo "Error: No se pudo leer el timestamp del issue"
+            exit 1
+          fi
+
+          LAST=$(date -d "$TIMESTAMP" +%s)
+          NOW=$(date +%s)
+          DIFF=$(( (NOW - LAST) / 60 ))
+          echo "Última actualización hace $DIFF min"
+
+          if [ ! -f "$STATE_FILE" ]; then
+            echo '{"phase":"online"}' > "$STATE_FILE"
+          fi
+          PHASE=$(jq -r '.phase' "$STATE_FILE")
+
+          if [ "$DIFF" -ge "$OFFLINE_THRESHOLD" ]; then
+            echo "Estado: SIN CORRIENTE"
+            echo '{"phase":"offline"}' > "$STATE_FILE"
+          else
+            if [ "$PHASE" = "offline" ]; then
+              echo "¡Volvió la luz! Enviando notificación..."
+              HOST=$(echo "$BODY" | jq -r '.hostname')
+              IP=$(echo "$BODY" | jq -r '.ip')
+              H=$((DIFF / 60))
+              M=$((DIFF % 60))
+
+              MENSAJE="⚡ *¡Volvió la luz en CEINPET!* ⚡%0A%0A🖥️ Host: $HOST%0A📡 IP: $IP%0A⏱️ Apagón: ${H}h ${M}m%0A🕐 Recuperado hace $DIFF min"
+
+              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+                -d chat_id="${TELEGRAM_CHAT_ID}" \
+                -d text="$MENSAJE" \
+                -d parse_mode="Markdown"
+            fi
+            echo Estado: EN LÍNEA
+            echo '{"phase":"online"}' > "$STATE_FILE"
+          fi
