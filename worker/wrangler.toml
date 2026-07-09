@@ -4,7 +4,7 @@ compatibility_date = "2024-12-18"
 
 [[kv_namespaces]]
 binding = "KV"
-id = ""
+id = "f59dde9fdf8b429fa94ba3a36151cd9d"
 
 [triggers]
 crons = ["*/2 * * * *"]
