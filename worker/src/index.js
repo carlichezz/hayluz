@@ -46,7 +46,7 @@ async function handleTelegramUpdate(update, env) {
   const chatId = msg.chat.id;
   const text = msg.text.trim();
 
-  const status = await getIssueStatusFromAPI();
+  const status = await getIssueStatusFromAPI(env);
 
   switch (text) {
     case '/start':
@@ -91,7 +91,7 @@ async function handleGithubWebhook(event, body, env) {
 
 async function cronCheck(env) {
   console.log('Cron: verificando estado...');
-  const status = await getIssueStatusFromAPI();
+  const status = await getIssueStatusFromAPI(env);
   await checkAndNotify(status, env);
 }
 
@@ -112,10 +112,18 @@ function parseIssueBody(body) {
   };
 }
 
-async function getIssueStatusFromAPI() {
+async function getIssueStatusFromAPI(env) {
+  const headers = { 'User-Agent': 'hayluz-bot' };
+  if (env?.GITHUB_TOKEN) {
+    headers['Authorization'] = `Bearer ${env.GITHUB_TOKEN}`;
+  }
   const res = await fetch(
-    `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/issues?state=all`
+    `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/issues?state=all`,
+    { headers }
   );
+  if (res.status === 403 || res.status === 429) {
+    throw new Error(`GitHub API rate limit. Try again later.`);
+  }
   if (!res.ok) throw new Error(`GitHub API error: ${res.status}`);
   const issues = await res.json();
   const issue = issues.find(i => i.title === ISSUE_TITLE);
