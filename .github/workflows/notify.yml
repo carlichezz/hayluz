@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Restaurar estado anterior
+      - name: Restaurar estado
         id: cache
         uses: actions/cache@v4
         with:
@@ -22,58 +22,108 @@ jobs:
           key: hayluz-state-${{ github.run_id }}
           restore-keys: hayluz-state-
 
-      - name: Verificar issue y notificar
+      - name: Verificar issue y procesar comandos
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
+          set -e
           OFFLINE_THRESHOLD=45
           STATE_FILE="state.json"
 
+          send_msg() {
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+              -d chat_id="$1" \
+              -d text="$2" \
+              -d parse_mode="Markdown" > /dev/null
+          }
+
+          # ─── INICIALIZAR ESTADO ───
+          if [ ! -f "$STATE_FILE" ]; then
+            echo '{"phase":"online","subscribers":[],"last_update_id":0,"offline_since":null}' > "$STATE_FILE"
+          fi
+          PHASE=$(jq -r '.phase' "$STATE_FILE")
+          LAST_UPDATE_ID=$(jq -r '.last_update_id' "$STATE_FILE")
+
+          # ─── OBTENER DATOS DEL ISSUE ───
           ISSUES=$(curl -s "https://api.github.com/repos/carlichezz/hayluz/issues?state=all")
           ISSUE_URL=$(echo "$ISSUES" | jq -r '.[] | select(.title == "Hay Luz en el CEINPET?") | .url')
-
           if [ -z "$ISSUE_URL" ] || [ "$ISSUE_URL" = "null" ]; then
             echo "Error: Issue no encontrado"
             exit 1
           fi
-
           BODY=$(curl -s "$ISSUE_URL" | jq -r '.body')
           TIMESTAMP=$(echo "$BODY" | jq -r '.timestamp')
-
           if [ -z "$TIMESTAMP" ] || [ "$TIMESTAMP" = "null" ]; then
-            echo "Error: No se pudo leer el timestamp del issue"
+            echo "Error: Timestamp no válido"
             exit 1
           fi
-
           LAST=$(date -d "$TIMESTAMP" +%s)
           NOW=$(date +%s)
           DIFF=$(( (NOW - LAST) / 60 ))
-          echo "Última actualización hace $DIFF min"
+          echo "Issue actualizado hace $DIFF min"
+          HOST=$(echo "$BODY" | jq -r '.hostname')
+          IP=$(echo "$BODY" | jq -r '.ip')
 
-          if [ ! -f "$STATE_FILE" ]; then
-            echo '{"phase":"online"}' > "$STATE_FILE"
+          # ─── PROCESAR COMANDOS DE TELEGRAM ───
+          OFFSET=$((LAST_UPDATE_ID + 1))
+          UPDATES=$(curl -s "https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=${OFFSET}&timeout=0")
+
+          while read -r UPDATE; do
+            UPDATE_ID=$(echo "$UPDATE" | jq -r '.update_id')
+            CHAT_ID=$(echo "$UPDATE" | jq -r '.message.chat.id')
+            TEXT=$(echo "$UPDATE" | jq -r '.message.text // ""')
+            echo "$UPDATE_ID" >> /tmp/update_ids.txt
+
+            case "$TEXT" in
+              "/start")
+                echo "Nuevo suscriptor: $CHAT_ID"
+                SUBS=$(jq -r '.subscribers' "$STATE_FILE" | jq ". + [$CHAT_ID] | unique")
+                jq ".subscribers = $SUBS" "$STATE_FILE" > /tmp/state.json && mv /tmp/state.json "$STATE_FILE"
+                send_msg "$CHAT_ID" "👋 *Bienvenido a HayLuzBot*%0A%0ATe notificaré cuando *vuelva la luz* en CEINPET.%0A%0AUsa /status para ver el estado actual."
+                ;;
+              "/status")
+                if [ "$DIFF" -lt "$OFFLINE_THRESHOLD" ]; then
+                  send_msg "$CHAT_ID" "⚡ *EN LÍNEA* ✅%0A%0A🖥️ $HOST%0A📡 $IP%0A🕐 Actualizado hace $DIFF min"
+                else
+                  send_msg "$CHAT_ID" "❌ *SIN CORRIENTE* 🔴%0A%0A⏱️ Sin conexión desde hace $DIFF min"
+                fi
+                ;;
+            esac
+          done < <(echo "$UPDATES" | jq -c '.result[]' 2>/dev/null)
+
+          # ─── ACTUALIZAR LAST_UPDATE_ID ───
+          if [ -f /tmp/update_ids.txt ]; then
+            MAX_ID=$(sort -n /tmp/update_ids.txt | tail -1)
+            if [ -n "$MAX_ID" ] && [ "$MAX_ID" -gt "$LAST_UPDATE_ID" ]; then
+              jq ".last_update_id = $MAX_ID" "$STATE_FILE" > /tmp/state.json && mv /tmp/state.json "$STATE_FILE"
+            fi
           fi
-          PHASE=$(jq -r '.phase' "$STATE_FILE")
 
+          # ─── DETECTAR TRANSICIÓN Y NOTIFICAR ───
           if [ "$DIFF" -ge "$OFFLINE_THRESHOLD" ]; then
             echo "Estado: SIN CORRIENTE"
-            echo '{"phase":"offline"}' > "$STATE_FILE"
+            CURRENT_PHASE=$(jq -r '.phase' "$STATE_FILE")
+            if [ "$CURRENT_PHASE" != "offline" ]; then
+              OFFLINE_SINCE=$(date -u -Iseconds)
+              jq ".phase = \"offline\" | .offline_since = \"$OFFLINE_SINCE\"" "$STATE_FILE" > /tmp/state.json && mv /tmp/state.json "$STATE_FILE"
+            fi
           else
             if [ "$PHASE" = "offline" ]; then
-              echo "¡Volvió la luz! Enviando notificación..."
-              HOST=$(echo "$BODY" | jq -r '.hostname')
-              IP=$(echo "$BODY" | jq -r '.ip')
-              H=$((DIFF / 60))
-              M=$((DIFF % 60))
-
-              MENSAJE="⚡ *¡Volvió la luz en CEINPET!* ⚡%0A%0A🖥️ Host: $HOST%0A📡 IP: $IP%0A⏱️ Apagón: ${H}h ${M}m%0A🕐 Recuperado hace $DIFF min"
-
-              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
-                -d chat_id="${TELEGRAM_CHAT_ID}" \
-                -d text="$MENSAJE" \
-                -d parse_mode="Markdown"
+              echo "¡Volvió la luz! Notificando a suscriptores..."
+              OFFLINE_SINCE=$(jq -r '.offline_since' "$STATE_FILE")
+              if [ -n "$OFFLINE_SINCE" ] && [ "$OFFLINE_SINCE" != "null" ]; then
+                OFFLINE_TS=$(date -d "$OFFLINE_SINCE" +%s 2>/dev/null || echo "$LAST")
+                DURATION_MIN=$(( (NOW - OFFLINE_TS) / 60 ))
+              else
+                DURATION_MIN=$DIFF
+              fi
+              H=$((DURATION_MIN / 60))
+              M=$((DURATION_MIN % 60))
+              MSG="⚡ *¡Volvió la luz en CEINPET!* ⚡%0A%0A🖥️ $HOST%0A📡 $IP%0A⏱️ Apagón: ${H}h ${M}m%0A🕐 Recuperado hace $DIFF min"
+              jq -r '.subscribers[]' "$STATE_FILE" 2>/dev/null | while read -r CID; do
+                [ -n "$CID" ] && send_msg "$CID" "$MSG"
+              done
             fi
-            echo Estado: EN LÍNEA
-            echo '{"phase":"online"}' > "$STATE_FILE"
+            echo "Estado: EN LÍNEA"
+            jq '.phase = "online"' "$STATE_FILE" > /tmp/state.json && mv /tmp/state.json "$STATE_FILE"
           fi
